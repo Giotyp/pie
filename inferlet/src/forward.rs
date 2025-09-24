@@ -91,6 +91,9 @@ pub trait Forward {
     fn release_exported_embeds(&self, name: &str);
 
     fn create_forward_pass(&self) -> ForwardPass;
+
+    fn evict_kv_pages(&self, ptrs: &[KvPage]) -> Vec<u32>;
+    fn restore_kv_pages(&self, ptrs: &[u32]) -> Vec<u32>;
 }
 
 impl Forward for Queue {
@@ -190,6 +193,15 @@ impl Forward for Queue {
         ForwardPass {
             inner: Rc::new(api::forward::create_forward_pass(&self.inner)),
         }
+    }
+
+    fn evict_kv_pages(&self, kv_pages: &[KvPage]) -> Vec<u32> {
+        let ptrs = kv_pages.iter().map(|kv| kv.ptr()).collect::<Vec<_>>();
+        self.evict_resource(Resource::KvPage, &ptrs)
+    }
+
+    fn restore_kv_pages(&self, ptrs: &[u32]) -> Vec<u32> {
+        self.restore_resource(Resource::KvPage, ptrs)
     }
 }
 

@@ -1,10 +1,4 @@
-"""
-Python Backend Handler
-
-This module provides the backend handler for the Python backend.
-Directly imports operations from flashinfer or pie_metal based on platform.
-Both backends now provide identical APIs.
-"""
+"""TODO: Add module docstring."""
 
 from __future__ import annotations
 
@@ -17,38 +11,14 @@ import torch
 import message
 
 # Safe import of adapter functionality
-from adapter_utils import ensure_adapter_available
-from platform_detection import is_apple_silicon
+from adapter_import_utils import ensure_adapter_available
 
-# Import profiler for performance analysis
-from profiler import start_profile
-
-# Direct import of backend operations based on platform
-# pie_metal now provides the same API structure as flashinfer
-if is_apple_silicon():
-    try:
-        import pie_metal.ops as ops  # type: ignore[import-not-found]
-
-        BACKEND_NAME = "pie-metal"
-        BACKEND_AVAILABLE = True
-    except ImportError:
-        ops = None  # type: ignore[assignment]
-        BACKEND_NAME = "pie-metal"
-        BACKEND_AVAILABLE = False
-else:
-    try:
-        import flashinfer as ops  # type: ignore[import-not-found]
-
-        BACKEND_NAME = "flashinfer"
-        BACKEND_AVAILABLE = True
-    except ImportError:
-        ops = None  # type: ignore[assignment]
-        BACKEND_NAME = "flashinfer"
-        BACKEND_AVAILABLE = False
+from config.common import ModelInfo
+from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
 
 class Handler:
-    """Python backend handler using platform-appropriate operations."""
+    """TODO: Add class docstring."""
 
     max_num_kv_pages: int
     max_num_embeds: int
@@ -57,203 +27,97 @@ class Handler:
 
     def __init__(
         self,
-        config: dict,
+        model,
+        model_info: ModelInfo,
+        ops,  # Backend operations (FlashInferOps, MetalOps, etc.)
+        kv_page_size: int,
+        max_dist_size: int,
+        max_num_kv_pages: int,
+        max_num_embeds: int,
+        max_batch_tokens: int,
+        max_num_adapters: int,
+        max_adapter_rank: int,
+        dtype: torch.dtype,
+        device: str,
     ):
-        """Initialize handler with platform-appropriate backend operations."""
+        """TODO: Add method docstring."""
         self.adapters = {}
-        self.ops = ops  # backend operations module (flashinfer or pie_metal.ops)
+        self.ops = ops  # backend operations
 
-        print(f"✅ Handler initialized with {BACKEND_NAME} backend")
-        print(f"   {BACKEND_NAME} available: {BACKEND_AVAILABLE}")
+        self.lm = model
+        self.model_info = model_info
+        self.kv_page_size = kv_page_size
+        self.max_dist_size = max_dist_size
+        self.max_num_kv_pages = max_num_kv_pages
+        self.max_num_embeds = max_num_embeds
+        self.max_batch_tokens = max_batch_tokens
+        self.max_num_adapters = max_num_adapters
+        self.max_adapter_rank = max_adapter_rank
+        self.dtype = dtype
+        self.device = device
+        self.logits_dtype = dtype
 
-        # Put imports here to avoid circular import
-        # pylint: disable=import-outside-toplevel
-        from model_loader import load_model, load_model_info
-        from model_factory import create_model_and_fusion_map
+        self.kv_cache_at_layer = [
+            torch.zeros(
+                (
+                    max_num_kv_pages,
+                    2,
+                    kv_page_size,
+                    self.lm.config.num_key_value_heads,
+                    self.lm.config.head_size,
+                ),
+                dtype=dtype,
+                device=device,
+            )
+            for _ in range(self.lm.config.num_layers)
+        ]
 
-        self.model_info = load_model_info(config)
-        self.kv_page_size = config["kv_page_size"]
-        self.max_dist_size = config["max_dist_size"]
-        self.max_num_embeds = config["max_num_embeds"]
-        self.max_batch_tokens = config["max_batch_tokens"]
-        self.max_num_adapters = config["max_num_adapters"]
-        self.max_adapter_rank = config["max_adapter_rank"]
-        self.dtype = getattr(torch, config["dtype"])
-        self.device = config["device"]
-        self.logits_dtype = getattr(torch, config["dtype"])
-
-        # If `gpu_mem_headroom` is set by the user, then we will cap the KV
-        # cache size so that there is some percentage of GPU memory left over
-        # after loading the model and allocating the KV cache.
-        if "gpu_mem_headroom" in config:
-            adaptive_kv_cache_size = True
-        else:
-            adaptive_kv_cache_size = False
-
-        # If the KV cache size is fixed, then we allocate the KV cache,
-        # which are big contiguous tensors, before loading the model,
-        # since during model loading, many temporary tensors are created,
-        # which may lead to fragmentation and out-of-memory errors if big
-        # tensors are not allocated up front.
-        if not adaptive_kv_cache_size:
-            self.max_num_kv_pages = config["max_num_kv_pages"]
-            self.kv_cache_at_layer = [
-                torch.zeros(
-                    (
-                        self.max_num_kv_pages,
-                        2,
-                        self.kv_page_size,
-                        self.model_info.architecture.num_key_value_heads,
-                        self.model_info.architecture.head_size,
-                    ),
-                    dtype=self.dtype,
-                    device=self.device,
-                )
-                for _ in range(self.model_info.architecture.num_layers)
-            ]
-
-            self.kv_cache_at_layer_cpu = [
-                torch.zeros(
-                    (
-                        self.max_num_kv_pages,
-                        2,
-                        self.kv_page_size,
-                        self.model_info.architecture.num_key_value_heads,
-                        self.model_info.architecture.head_size,
-                    ),
-                    dtype=self.dtype,
-                    device="cpu",
-                )
-                for _ in range(self.model_info.architecture.num_layers)
-            ]
-
-        self.embeds = torch.empty(
-            (self.max_num_embeds, self.model_info.architecture.hidden_size),
-            device=self.device,
-            dtype=self.dtype,
-        )
+        self.kv_cache_at_layer_cpu = [
+            torch.zeros(
+                (
+                    max_num_kv_pages,
+                    2,
+                    kv_page_size,
+                    self.lm.config.num_key_value_heads,
+                    self.lm.config.head_size,
+                ),
+                dtype=dtype,
+                device='cpu',
+            )
+            for _ in range(self.lm.config.num_layers)
+        ]
 
         self.adapter_at_layer = [
             (
                 torch.zeros(
                     (
-                        self.max_num_adapters,
-                        self.max_adapter_rank * 3,
-                        self.model_info.architecture.hidden_size,
+                        max_num_adapters,
+                        max_adapter_rank * 3,
+                        self.lm.config.hidden_size,
                     ),
-                    dtype=self.dtype,
-                    device=self.device,
+                    dtype=dtype,
+                    device=device,
                 ),
                 torch.zeros(
                     (
-                        self.max_num_adapters,
-                        self.model_info.architecture.head_size
+                        max_num_adapters,
+                        self.lm.config.head_size
                         * (
-                            self.model_info.architecture.num_query_heads
-                            + self.model_info.architecture.num_key_value_heads * 2
+                            self.lm.config.num_query_heads
+                            + self.lm.config.num_key_value_heads * 2
                         ),
-                        self.max_adapter_rank,
+                        max_adapter_rank,
                     ),
-                    dtype=self.dtype,
-                    device=self.device,
+                    dtype=dtype,
+                    device=device,
                 ),
             )
-            for _ in range(self.model_info.architecture.num_layers)
+            for _ in range(self.lm.config.num_layers)
         ]
 
-        self.lm = load_model(
-            config,
-            self.model_info,
-            create_model_and_fusion_map,
+        self.embeds = torch.empty(
+            (max_num_embeds, self.lm.config.hidden_size), device=device, dtype=dtype
         )
-
-        # Validate model structure has required attributes and they are callable
-        if not hasattr(self.lm, "lm_head"):
-            raise AttributeError("Loaded model is missing required 'lm_head' attribute")
-        if not callable(self.lm.lm_head):  # type: ignore[attr-defined]
-            raise TypeError("Model 'lm_head' attribute must be callable")
-        if not hasattr(self.lm, "model"):
-            raise AttributeError("Loaded model is missing required 'model' attribute")
-        if not hasattr(self.lm.model, "embed_tokens"):  # type: ignore[attr-defined]
-            raise AttributeError("Model is missing required 'embed_tokens' method")
-        if not callable(self.lm.model.embed_tokens):  # type: ignore[attr-defined]
-            raise TypeError("Model 'embed_tokens' attribute must be callable")
-
-        # If `gpu_mem_headroom` is set by the user, then we have to allocate the KV
-        # cache at the end and dynamically calculate the number of KV pages based on
-        # the available GPU memory.
-        if adaptive_kv_cache_size:
-            # Calculate the available GPU memory for the KV cache after accounting for
-            # the reserved GPU memory specified through `gpu_mem_headroom`.
-            free_gpu_mem_bytes, total_gpu_mem_bytes = torch.cuda.mem_get_info(
-                self.device
-            )
-            used_gpu_mem_bytes = total_gpu_mem_bytes - free_gpu_mem_bytes
-            reserved_gpu_mem_percentage = config["gpu_mem_headroom"]
-            useable_gpu_mem_bytes = total_gpu_mem_bytes * (
-                1 - (reserved_gpu_mem_percentage / 100)
-            )
-            available_kv_cache_bytes = useable_gpu_mem_bytes - used_gpu_mem_bytes
-
-            if available_kv_cache_bytes <= 0:
-                raise ValueError(
-                    "Not enough GPU memory available to allocate the KV cache. "
-                    "Please decrease 'gpu_mem_headroom'."
-                )
-
-            # Calculate the number of KV pages based on the available GPU memory.
-            self.max_num_kv_pages = int(
-                available_kv_cache_bytes
-                / (
-                    self.kv_page_size
-                    * 2
-                    * self.model_info.architecture.num_key_value_heads
-                    * self.model_info.architecture.head_size
-                    * self.model_info.architecture.num_layers
-                    * self.dtype.itemsize
-                )
-            )
-
-            # If the user also specified "max_num_kv_pages", then we will use the
-            # smaller of the two values.
-            if "max_num_kv_pages" in config:
-                if self.max_num_kv_pages > config["max_num_kv_pages"]:
-                    self.max_num_kv_pages = config["max_num_kv_pages"]
-                elif self.max_num_kv_pages < config["max_num_kv_pages"]:
-                    print(
-                        f"'max_num_kv_pages' is reduced to {self.max_num_kv_pages} "
-                        "to respect 'gpu_mem_headroom'."
-                    )
-
-            self.kv_cache_at_layer = [
-                torch.zeros(
-                    (
-                        self.max_num_kv_pages,
-                        2,
-                        self.kv_page_size,
-                        self.model_info.architecture.num_key_value_heads,
-                        self.model_info.architecture.head_size,
-                    ),
-                    dtype=self.dtype,
-                    device=self.device,
-                )
-                for _ in range(self.model_info.architecture.num_layers)
-            ]
-
-            self.kv_cache_at_layer_cpu = [
-                torch.zeros(
-                    (
-                        self.max_num_kv_pages,
-                        2,
-                        self.kv_page_size,
-                        self.model_info.architecture.num_key_value_heads,
-                        self.model_info.architecture.head_size,
-                    ),
-                    dtype=self.dtype,
-                    device="cpu",
-                )
-                for _ in range(self.model_info.architecture.num_layers)
-            ]
 
         self.inter_fill_time = time.time()
 
@@ -312,10 +176,10 @@ class Handler:
                     f"maximum {self.max_num_embeds}."
                 )
 
-            image_tensor = self.ops.image.decode_image(  # type: ignore[union-attr]
+            image_tensor = self.ops.decode_image(
                 req.image_blob, dtype=self.dtype, device=self.device
             )
-            image_embed = self.lm.model.embed_image(image_tensor)  # type: ignore[attr-defined]
+            image_embed = self.lm.model.embed_image(image_tensor)
 
             for i, ptr in enumerate(req.embed_ptrs):
                 if ptr < 0 or ptr >= self.max_num_embeds:
@@ -340,39 +204,41 @@ class Handler:
                 pass
 
     @torch.inference_mode()
+    @checkpoint_validation(
+        checkpoint_name="handler_forward_pass",
+        capture_tensors=True,
+        include_metadata=True,
+        tolerance=1e-5,
+        backend_comparison=None,
+        performance_monitoring=True,
+    )
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
         """
         Processes a batch of forward pass requests through the language model.
         """
-        with start_profile("forward_pass_total"):
-            # Sort requests by adapter to optimize the adapter subpass.
-            with start_profile("request_sorting"):
-                reqs = sorted(reqs, key=lambda o: (o.adapter is None, o.adapter))
+        # Sort requests by adapter to optimize the adapter subpass.
+        reqs = sorted(reqs, key=lambda o: (o.adapter is None, o.adapter))
 
-            # 1. Consolidate and process all requests into a single batch.
-            with start_profile("batch_consolidation"):
-                batch = ForwardPassBatch(self)
-                for req in reqs:
-                    batch.add_request(req)
+        # 1. Consolidate and process all requests into a single batch.
+        batch = ForwardPassBatch(self)
+        for req in reqs:
+            batch.add_request(req)
 
-            # 2. Finalize the batch to get model inputs as tensors.
-            with start_profile("batch_finalize"):
-                model_inputs = batch.finalize()
+        # 2. Finalize the batch to get model inputs as tensors.
+        model_inputs = batch.finalize()
 
-            # 3. Run the forward pass through the model.
-            with start_profile("model_forward"):
-                with _device_context(self.device):
-                    output_embeds = self.lm.model.forward(  # type: ignore[attr-defined]
-                        kv_cache_at_layer=self.kv_cache_at_layer, **model_inputs
-                    )
+        # 3. Run the forward pass through the model.
+        with _device_context(self.device):
+            output_embeds = self.lm.model.forward(
+                kv_cache_at_layer=self.kv_cache_at_layer, **model_inputs
+            )
 
             # 4. Package the model outputs into response messages.
-            with start_profile("package_responses"):
-                responses = batch.package_responses(output_embeds)
+            responses = batch.package_responses(output_embeds)
 
         return responses
 
-        @torch.inference_mode()
+    @torch.inference_mode()
     def evict_kv_pages(self, reqs: list[message.EvictResourceRequest]):
         for req in reqs:
             for layer in range(self.lm.config.num_layers):
@@ -611,61 +477,71 @@ class ForwardPassBatch:
         """Finalizes batch preparation, creating tensors and the adapter subpass."""
         device = self._handler.device
 
-        with start_profile("finalize_adapter_setup"):
-            adapter_subpass = None
-            if self.adapter_subpass_needed:
-                adapter_subpass_class = ensure_adapter_available()
-                seeds_tensor = torch.as_tensor(
-                    self.seeds, device=device, dtype=torch.long
-                )
-                adapter_subpass = adapter_subpass_class(
-                    adapter_at_layer=self._handler.adapter_at_layer,
-                    adapter_indices=self.adapter_indices,
-                    adapter_extras=self._handler.adapters,
-                    rand_seeds=seeds_tensor,
-                    qo_indptr=self.qo_indptr,
-                )
-
-        with start_profile("finalize_tensor_creation"):
-            batched_attention_mask = (
-                np.concatenate(self.attention_masks)
-                if self.attention_masks
-                else np.array([], dtype=np.bool_)
-            )
-            token_ids_tensor = torch.as_tensor(
-                self.batch_token_ids, device=device, dtype=torch.int32
+        adapter_subpass = None
+        if self.adapter_subpass_needed:
+            adapter_subpass_class = ensure_adapter_available()
+            seeds_tensor = torch.as_tensor(self.seeds, device=device, dtype=torch.long)
+            adapter_subpass = adapter_subpass_class(
+                adapter_at_layer=self._handler.adapter_at_layer,
+                adapter_indices=self.adapter_indices,
+                adapter_extras=self._handler.adapters,
+                rand_seeds=seeds_tensor,
+                qo_indptr=self.qo_indptr,
             )
 
-        with start_profile("finalize_embedding_lookup"):
-            embed_tokens = self._handler.lm.model.embed_tokens  # type: ignore[attr-defined]
-            input_embeds = embed_tokens(token_ids_tensor)  # type: ignore[operator]
+        batched_attention_mask = (
+            np.concatenate(self.attention_masks)
+            if self.attention_masks
+            else np.array([], dtype=np.bool_)
+        )
+        token_ids_tensor = torch.as_tensor(
+            self.batch_token_ids, device=device, dtype=torch.int32
+        )
+        input_embeds = self._handler.lm.model.embed_tokens(token_ids_tensor)
 
-        with start_profile("finalize_create_input_dict"):
-            result = {
-                "input_embeds": input_embeds,
-                "position_ids": torch.as_tensor(
-                    self.batch_position_ids, device=device, dtype=torch.int32
-                ),
-                "qo_indptr": torch.as_tensor(
-                    self.qo_indptr, device=device, dtype=torch.int32
-                ),
-                "kv_page_indices": torch.as_tensor(
-                    self.kv_page_indices, device=device, dtype=torch.int32
-                ),
-                "kv_page_indptr": torch.as_tensor(
-                    self.kv_page_indptr, device=device, dtype=torch.int32
-                ),
-                "kv_last_page_lens": torch.as_tensor(
-                    self.kv_last_page_lengths, device=device, dtype=torch.int32
-                ),
-                "custom_mask": torch.as_tensor(
-                    batched_attention_mask, device=device, dtype=torch.bool
-                ),
-                "single_token_inference_mode": self.single_token_inference_mode,
-                "adapter_subpass": adapter_subpass,
-            }
+        if input_embeds.numel() and is_tensor_debug_enabled():
+            embed_min, embed_max = input_embeds.aminmax()
+            has_nan = torch.isnan(input_embeds).any().item()
+            has_inf = torch.isinf(input_embeds).any().item()
+            print(
+                "[MetalTensorDebug] stage=input_embeds",
+                "dtype=",
+                input_embeds.dtype,
+                "device=",
+                input_embeds.device,
+                "min=",
+                float(embed_min),
+                "max=",
+                float(embed_max),
+                "has_nan=",
+                bool(has_nan),
+                "has_inf=",
+                bool(has_inf),
+            )
 
-        return result
+        return {
+            "input_embeds": input_embeds,
+            "position_ids": torch.as_tensor(
+                self.batch_position_ids, device=device, dtype=torch.int32
+            ),
+            "qo_indptr": torch.as_tensor(
+                self.qo_indptr, device=device, dtype=torch.int32
+            ),
+            "kv_page_indices": torch.as_tensor(
+                self.kv_page_indices, device=device, dtype=torch.int32
+            ),
+            "kv_page_indptr": torch.as_tensor(
+                self.kv_page_indptr, device=device, dtype=torch.int32
+            ),
+            "kv_last_page_lens": torch.as_tensor(
+                self.kv_last_page_lengths, device=device, dtype=torch.int32
+            ),
+            "custom_mask": torch.as_tensor(
+                batched_attention_mask, device=device, dtype=torch.bool
+            ),
+            "single_token_inference_mode": self.single_token_inference_mode,
+            "adapter_subpass": adapter_subpass,
+        }
 
     def package_responses(
         self, output_embeds: torch.Tensor
@@ -690,7 +566,7 @@ class ForwardPassBatch:
         if logits_input.dtype != self.logits_dtype:
             logits_input = logits_input.to(self.logits_dtype)
 
-        logits = self._handler.lm.lm_head(logits_input)  # type: ignore[attr-defined, operator]
+        logits = self._handler.lm.lm_head(logits_input)
 
         # Promote logits to handler dtype for numerically stable softmax on Metal/MPS
         if logits.dtype != self.logits_dtype:
@@ -751,16 +627,14 @@ class ForwardPassBatch:
             else:
                 sampled = None
                 if sampler_idx == 1:  # Old 0: sampling_from_probs
-                    ops_sampling = self._handler.ops.sampling  # type: ignore
-                    sampled = ops_sampling.sampling_from_probs(group_probs)
+                    sampled = self._handler.ops.sampling_from_probs(group_probs)
                 elif sampler_idx == 2:  # Old 1: top_p_sampling_from_probs
                     top_p_vals = torch.tensor(
                         [self.sampler_params[i]["top_p"] for i in indices],
                         device=self._handler.device,
                         dtype=self._handler.dtype,
                     )
-                    ops_sampling = self._handler.ops.sampling  # type: ignore
-                    sampled = ops_sampling.top_p_sampling_from_probs(
+                    sampled = self._handler.ops.top_p_sampling_from_probs(
                         group_probs, top_p=top_p_vals
                     )
                 elif sampler_idx == 3:  # Old 2: top_k_sampling_from_probs
@@ -769,8 +643,7 @@ class ForwardPassBatch:
                         device=self._handler.device,
                         dtype=torch.long,
                     )
-                    ops_sampling = self._handler.ops.sampling  # type: ignore
-                    sampled = ops_sampling.top_k_sampling_from_probs(
+                    sampled = self._handler.ops.top_k_sampling_from_probs(
                         group_probs, top_k=top_k_vals
                     )
                 elif sampler_idx == 4:  # Old 3: min_p_sampling_from_probs
@@ -779,8 +652,7 @@ class ForwardPassBatch:
                         device=self._handler.device,
                         dtype=self._handler.dtype,
                     )
-                    ops_sampling = self._handler.ops.sampling  # type: ignore
-                    sampled = ops_sampling.min_p_sampling_from_probs(
+                    sampled = self._handler.ops.min_p_sampling_from_probs(
                         group_probs, min_p=min_p_vals
                     )
                 elif sampler_idx == 5:  # Old 4: top_k_top_p_sampling_from_probs
@@ -794,9 +666,9 @@ class ForwardPassBatch:
                         device=self._handler.device,
                         dtype=self._handler.dtype,
                     )
-                    ops_sampling = self._handler.ops.sampling  # type: ignore
-                    fn = ops_sampling.top_k_top_p_sampling_from_probs
-                    sampled = fn(group_probs, top_k=top_k_vals, top_p=top_p_vals)
+                    sampled = self._handler.ops.top_k_top_p_sampling_from_probs(
+                        group_probs, top_k=top_k_vals, top_p=top_p_vals
+                    )
                 else:
                     raise ValueError(f"Unknown sampler index: {sampler_idx}")
 

@@ -8,7 +8,7 @@ use crate::model::batching::{BatchPolicySelector, BatchScheduler, ForwardPassPol
 use crate::model::request::{
     FORWARD_PASS_ID, HANDSHAKE_ID, HandshakeRequest, HandshakeResponse, HeartbeatRequest, Request,
 };
-use crate::model::resource::{ResourceId, ResourceManager, ResourceTypeId};
+use crate::model::resource::{DeviceId, ResourceId, ResourceManager, ResourceTypeId};
 use crate::model::tokenizer::BytePairEncoder;
 use crate::runtime::trap_exception;
 use crate::service::{self, Service, ServiceError};
@@ -160,12 +160,21 @@ pub enum Command {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         count: usize,
-        response: oneshot::Sender<Vec<ResourceId>>,
+        response: oneshot::Sender<(Vec<ResourceId>, DeviceId)>,
     },
     Deallocate {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         ptrs: Vec<ResourceId>,
+        device_ids: Vec<DeviceId>,
+    },
+    EvictRestore {
+        inst_id: InstanceId,
+        type_id: ResourceTypeId,
+        device_ids: Vec<DeviceId>,
+        ptrs: Vec<ResourceId>,
+        evict: bool,
+        response: oneshot::Sender<(Vec<ResourceId>, DeviceId)>,
     },
     Cleanup {
         inst_id: InstanceId,
@@ -665,11 +674,33 @@ impl Service for Model {
                 inst_id,
                 type_id,
                 ptrs,
+                device_ids,
             } => {
-                if let Err(e) = self.resource_manager.deallocate(inst_id, type_id, ptrs) {
+                if let Err(e) = self
+                    .resource_manager
+                    .deallocate(inst_id, type_id, ptrs, device_ids)
+                {
                     trap_exception(inst_id, e);
                 }
             }
+            Command::EvictRestore {
+                inst_id,
+                type_id,
+                device_ids,
+                ptrs,
+                evict,
+                response,
+            } => match self
+                .resource_manager
+                .evict_restore(inst_id, type_id, device_ids, ptrs, evict)
+            {
+                Ok(allocated_ids) => {
+                    if response.send(allocated_ids).is_err() {
+                        println!("[Warn] Allocate response channel closed before sending.");
+                    }
+                }
+                Err(e) => trap_exception(inst_id, e),
+            },
             Command::Cleanup { inst_id } => {
                 if let Err(e) = self.resource_manager.cleanup(inst_id) {
                     trap_exception(inst_id, e);

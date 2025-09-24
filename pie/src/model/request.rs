@@ -13,6 +13,8 @@ pub static INITIALIZE_ADAPTER_ID: u32 = 5;
 pub static UPDATE_ADAPTER_ID: u32 = 6;
 pub static UPLOAD_ADAPTER_ID: u32 = 7;
 pub static DOWNLOAD_ADAPTER_ID: u32 = 8;
+pub static EVICT_RESOURCE_ID: u32 = 9;
+pub static RESTORE_RESOURCE_ID: u32 = 10;
 
 #[derive(Debug)]
 pub enum Request {
@@ -29,6 +31,8 @@ pub enum Request {
     UpdateAdapter(UpdateAdapterRequest),
     UploadAdapter(UploadAdapterRequest),
     DownloadAdapter(DownloadAdapterRequest, oneshot::Sender<Bytes>),
+    EvictResource(EvictResourceRequest),
+    RestoreResource(RestoreResourceRequest),
 }
 
 impl Request {
@@ -68,6 +72,8 @@ impl Request {
             Request::UpdateAdapter(_) => UPDATE_ADAPTER_ID,
             Request::UploadAdapter(_) => UPLOAD_ADAPTER_ID,
             Request::DownloadAdapter(_, _) => DOWNLOAD_ADAPTER_ID,
+            Request::EvictResource(_) => EVICT_RESOURCE_ID,
+            Request::RestoreResource(_) => RESTORE_RESOURCE_ID,
         }
     }
 
@@ -83,6 +89,8 @@ impl Request {
             Request::UpdateAdapter(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
             Request::UploadAdapter(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
             Request::DownloadAdapter(req, _) => Bytes::from(rmp_serde::to_vec_named(&req)?),
+            Request::EvictResource(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
+            Request::RestoreResource(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
         };
         Ok(b)
     }
@@ -211,4 +219,18 @@ pub struct UploadAdapterRequest {
 pub struct DownloadAdapterRequest {
     pub adapter_ptr: u32,
     pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EvictResourceRequest {
+    pub type_id: u32,
+    pub src_ptrs: Vec<u32>,
+    pub dst_ptrs: Vec<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestoreResourceRequest {
+    pub type_id: u32,
+    pub src_ptrs: Vec<u32>,
+    pub dst_ptrs: Vec<u32>,
 }

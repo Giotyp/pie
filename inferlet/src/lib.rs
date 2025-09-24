@@ -308,6 +308,14 @@ impl Queue {
     pub fn release_exported_resources(&self, resource: Resource, name: &str) {
         api::release_exported_resources(&self.inner, resource as u32, name)
     }
+
+    pub fn evict_resource(&self, resource: Resource, ptrs: &[u32]) -> Vec<u32> {
+        core::evict_resources(&self.inner, resource as u32, ptrs)
+    }
+
+    pub fn restore_resource(&self, resource: Resource, ptrs: &[u32]) -> Vec<u32> {
+        core::restore_resources(&self.inner, resource as u32, ptrs)
+    }
 }
 
 impl Blob {

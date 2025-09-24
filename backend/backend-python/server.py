@@ -40,6 +40,8 @@ from message import (
     QueryRequest,
     UpdateAdapterRequest,
     UploadAdapterRequest,
+    EvictResourceRequest,
+    RestoreResourceRequest,
 )
 
 from model_loader import MetadataNotFoundError
@@ -57,6 +59,8 @@ class HandlerId(enum.Enum):
     UPDATE_ADAPTER = 6
     UPLOAD_HANDLER = 7
     DOWNLOAD_HANDLER = 8
+    EVICT_RESOURCES = 9
+    RESTORE_RESOURCES = 10
 
 
 def resolve_cache_dir(cache_dir: str | None) -> str:
@@ -320,6 +324,10 @@ def worker_thread(
                     handler.upload_handler(reqs)
                 case HandlerId.DOWNLOAD_HANDLER.value:
                     resps = handler.download_handler(reqs)
+                case HandlerId.EVICT_RESOURCES.value:
+                    handler.evict_kv_pages(reqs)
+                case HandlerId.RESTORE_RESOURCES.value:
+                    handler.restore_kv_pages(reqs)
                 case HandlerId.HEARTBEAT.value:
                     raise RuntimeError(
                         "Heartbeat should not be handled by the worker thread"
@@ -379,6 +387,12 @@ def zmq_listen_thread(
         HandlerId.UPLOAD_HANDLER.value: msgspec.msgpack.Decoder(UploadAdapterRequest),
         HandlerId.DOWNLOAD_HANDLER.value: msgspec.msgpack.Decoder(
             DownloadAdapterRequest
+        ),
+        HandlerId.EVICT_RESOURCES.value: msgspec.msgpack.Decoder(
+            EvictResourceRequest
+        ),
+        HandlerId.RESTORE_RESOURCES.value: msgspec.msgpack.Decoder(
+            RestoreResourceRequest
         ),
     }
 

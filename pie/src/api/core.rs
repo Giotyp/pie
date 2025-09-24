@@ -8,8 +8,9 @@ use crate::api::inferlet;
 use crate::api::inferlet::core::common::Priority;
 use crate::instance::InstanceState;
 use crate::model;
+use crate::model::request::{EvictResourceRequest, RestoreResourceRequest};
 use crate::model::request::{QueryRequest, QueryResponse, Request};
-use crate::model::resource::{ResourceId, ResourceTypeId};
+use crate::model::resource::{DeviceId, DeviceIdExt, ResourceId, ResourceTypeId};
 use crate::model::{ModelInfo, submit_request};
 use anyhow::Result;
 use bytes::Bytes;
@@ -119,8 +120,8 @@ impl inferlet::core::common::Host for InstanceState {
         }
         .dispatch(svc_id)?;
 
-        let phys_ptrs = rx.await?;
-        let virt_ptrs = self.map_resources(svc_id, resource_type, &phys_ptrs);
+        let (phys_ptrs, device_id) = rx.await?;
+        let virt_ptrs = self.map_resources(svc_id, resource_type, &phys_ptrs, device_id);
 
         Ok(virt_ptrs)
     }
@@ -133,12 +134,13 @@ impl inferlet::core::common::Host for InstanceState {
     ) -> Result<()> {
         let inst_id = self.id();
         let svc_id = self.ctx().table.get(&queue)?.service_id;
-        self.unmap_resources(svc_id, resource_type, &ptrs);
+        let device_ids = self.unmap_resources(svc_id, resource_type, &ptrs);
 
         model::Command::Deallocate {
             inst_id,
             type_id: resource_type,
-            ptrs,
+            ptrs: ptrs.clone(),
+            device_ids,
         }
         .dispatch(svc_id)?;
 
@@ -232,9 +234,143 @@ impl inferlet::core::common::Host for InstanceState {
         .dispatch(svc_id)?;
 
         let phys_ptrs = rx.await?;
-        let virt_ptrs = self.map_resources(svc_id, resource_type, &phys_ptrs);
+        let virt_ptrs = self.map_resources(svc_id, resource_type, &phys_ptrs, DeviceId::get_gpu());
 
         Ok(virt_ptrs)
+    }
+
+    async fn evict_resources(
+        &mut self,
+        queue: Resource<Queue>,
+        resource_type: ResourceTypeId,
+        ptrs: Vec<ResourceId>,
+    ) -> anyhow::Result<()> {
+        let (svc_id, queue_id, priority) = self.read_queue(&queue)?;
+
+        let mut evict_devices = Vec::new();
+        let mut evict_ptrs = Vec::new();
+
+        // Translate virtual ptrs to physical ptrs
+        let gpu_ptrs = {
+            let mut vec = Vec::new();
+            for ptr in ptrs.iter() {
+                // Check if the pointer belongs to the GPU resource pool
+                let device_id = self.get_device_id(svc_id, resource_type, *ptr).unwrap();
+                if !device_id.is_gpu() {
+                    // No eviction needed for CPU pointers
+                    continue;
+                }
+
+                let p = self.translate_resource_ptr(svc_id, resource_type, *ptr)?;
+                vec.push(p);
+
+                evict_ptrs.push(*ptr);
+                evict_devices.push(device_id);
+            }
+            vec
+        };
+
+        if gpu_ptrs.is_empty() {
+            // No eviction needed
+            return Ok(());
+        }
+
+        // Unmap from GPU Pool
+        let (tx, rx) = oneshot::channel();
+        let inst_id = self.id();
+        model::Command::EvictRestore {
+            inst_id,
+            type_id: resource_type,
+            device_ids: evict_devices,
+            ptrs: evict_ptrs.clone(),
+            evict: true,
+            response: tx,
+        }
+        .dispatch(svc_id)?;
+
+        let (cpu_ptrs, device_id) = rx.await?;
+        // Change physical pointer and device in instance state
+        for (virt_id, new_ptr) in evict_ptrs.iter().zip(cpu_ptrs.iter()) {
+            self.evict_resource_ptr(svc_id, resource_type, *virt_id, *new_ptr, device_id);
+        }
+
+        // Send evict command to model server
+
+        let req = Request::EvictResource(EvictResourceRequest {
+            type_id: resource_type,
+            src_ptrs: gpu_ptrs,
+            dst_ptrs: cpu_ptrs,
+        });
+
+        submit_request(svc_id, queue_id, priority, req);
+
+        Ok(())
+    }
+
+    async fn restore_resources(
+        &mut self,
+        queue: Resource<Queue>,
+        resource_type: ResourceTypeId,
+        ptrs: Vec<ResourceId>,
+    ) -> anyhow::Result<()> {
+        let inst_id = self.id();
+        let (svc_id, queue_id, priority) = self.read_queue(&queue)?;
+
+        let mut restore_devices = Vec::new();
+        let mut restore_ptrs = Vec::new();
+
+        // Translate virtual ptrs to physical ptrs
+        let cpu_ptrs = {
+            let mut vec = Vec::new();
+            for ptr in ptrs.iter() {
+                // Check if the pointer belongs to the GPU resource pool
+                let device_id = self.get_device_id(svc_id, resource_type, *ptr).unwrap();
+                if device_id.is_gpu() {
+                    // No eviction needed for GPU pointers
+                    continue;
+                }
+
+                let p = self.translate_resource_ptr(svc_id, resource_type, *ptr)?;
+                vec.push(p);
+
+                restore_ptrs.push(*ptr);
+                restore_devices.push(device_id);
+            }
+            vec
+        };
+
+        if cpu_ptrs.is_empty() {
+            // No restore needed
+            return Ok(());
+        }
+
+        // Unmap from CPU Pool
+        let (tx, rx) = oneshot::channel();
+        model::Command::EvictRestore {
+            inst_id,
+            type_id: resource_type,
+            device_ids: restore_devices,
+            ptrs: restore_ptrs.clone(),
+            evict: false,
+            response: tx,
+        }
+        .dispatch(svc_id)?;
+
+        let (gpu_ptrs, device_id) = rx.await?;
+        // Change physical pointer and device in instance state
+        for (virt_id, new_ptr) in restore_ptrs.iter().zip(gpu_ptrs.iter()) {
+            self.restore_resource_ptr(svc_id, resource_type, *virt_id, *new_ptr, device_id);
+        }
+
+        let req = Request::RestoreResource(RestoreResourceRequest {
+            type_id: resource_type,
+            src_ptrs: cpu_ptrs,
+            dst_ptrs: gpu_ptrs,
+        });
+
+        submit_request(svc_id, queue_id, priority, req);
+
+        Ok(())
     }
 }
 

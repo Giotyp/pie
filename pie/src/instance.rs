@@ -1,5 +1,5 @@
 use crate::api::core::Queue;
-use crate::model::resource::{ResourceId, ResourceTypeId};
+use crate::model::resource::{DeviceId, DeviceIdExt, ResourceId, ResourceTypeId};
 use crate::utils;
 use anyhow::{Result, bail, format_err};
 use bytes::Bytes;
@@ -28,6 +28,8 @@ struct ResourceIdMapper {
     virtual_id_pool: utils::IdPool<u32>,
     /// The map from a virtual ID to its corresponding physical ID.
     virtual_to_physical: HashMap<ResourceId, ResourceId>,
+    /// The map from a virtual ID to its device type.
+    virtual_to_device: HashMap<ResourceId, DeviceId>,
 }
 
 impl Default for ResourceIdMapper {
@@ -35,6 +37,7 @@ impl Default for ResourceIdMapper {
         ResourceIdMapper {
             virtual_id_pool: utils::IdPool::new(u32::MAX),
             virtual_to_physical: HashMap::new(),
+            virtual_to_device: HashMap::new(),
         }
     }
 }
@@ -43,7 +46,11 @@ impl ResourceIdMapper {
     /// Creates new virtual IDs and maps them to the provided physical IDs.
     ///
     /// Returns the newly created virtual IDs in the same order as the provided physical IDs.
-    fn map_resources(&mut self, physical_ids: &[ResourceId]) -> Vec<ResourceId> {
+    fn map_resources(
+        &mut self,
+        physical_ids: &[ResourceId],
+        device_id: DeviceId,
+    ) -> Vec<ResourceId> {
         let virtual_ids = self
             .virtual_id_pool
             .acquire_many(physical_ids.len())
@@ -54,22 +61,61 @@ impl ResourceIdMapper {
 
         for (&virtual_id, &physical_id) in virtual_ids.iter().zip(physical_ids.iter()) {
             self.virtual_to_physical.insert(virtual_id, physical_id);
+            self.virtual_to_device.insert(virtual_id, device_id);
         }
 
         virtual_ids
     }
 
     /// Removes the mappings for the given virtual IDs and releases them back to the pool.
-    fn unmap_resources(&mut self, virtual_ids: &[ResourceId]) {
+    fn unmap_resources(&mut self, virtual_ids: &[ResourceId]) -> Vec<DeviceId> {
+        let device_ids = virtual_ids
+            .iter()
+            .filter_map(|&vid| self.virtual_to_device.get(&vid).copied())
+            .collect::<Vec<_>>();
+
         for &virtual_id in virtual_ids {
             self.virtual_to_physical.remove(&virtual_id);
+            self.virtual_to_device.remove(&virtual_id);
         }
         self.virtual_id_pool.release_many(virtual_ids).unwrap();
+        device_ids
     }
 
     /// Translates a single virtual ID to its corresponding physical ID.
     fn translate(&self, virtual_id: ResourceId) -> Option<ResourceId> {
         self.virtual_to_physical.get(&virtual_id).copied()
+    }
+
+    /// Get the Device ID of a single virtual ID
+    fn get_device_id(&self, virtual_id: ResourceId) -> Option<DeviceId> {
+        self.virtual_to_device.get(&virtual_id).copied()
+    }
+
+    /// Evicts a single virtual ID from GPU to CPU memory.
+    fn evict_id(&mut self, virtual_id: ResourceId, new_ptr: ResourceId, new_device: DeviceId) {
+        if let Some(device_id) = self.virtual_to_device.get_mut(&virtual_id) {
+            if device_id.is_gpu() {
+                *device_id = new_device;
+                // Change physical pointer to new CPU pointer
+                if let Some(phys_id) = self.virtual_to_physical.get_mut(&virtual_id) {
+                    *phys_id = new_ptr;
+                }
+            }
+        }
+    }
+
+    /// Restores a single virtual ID from CPU to GPU memory.
+    fn restore_id(&mut self, virtual_id: ResourceId, new_ptr: ResourceId, new_device: DeviceId) {
+        if let Some(device_id) = self.virtual_to_device.get_mut(&virtual_id) {
+            if !device_id.is_gpu() {
+                *device_id = new_device;
+                // Change physical pointer to new GPU pointer
+                if let Some(phys_id) = self.virtual_to_physical.get_mut(&virtual_id) {
+                    *phys_id = new_ptr;
+                }
+            }
+        }
     }
 }
 
@@ -152,11 +198,12 @@ impl InstanceState {
         service_id: usize,
         resource_type: ResourceTypeId,
         phys_ids: &[ResourceId],
+        device_id: DeviceId,
     ) -> Vec<ResourceId> {
         self.resources
             .entry((service_id, resource_type))
             .or_default()
-            .map_resources(phys_ids)
+            .map_resources(phys_ids, device_id)
     }
 
     pub fn unmap_resources(
@@ -164,10 +211,12 @@ impl InstanceState {
         service_id: usize,
         resource_type: ResourceTypeId,
         virt_ids: &[ResourceId],
-    ) {
+    ) -> Vec<DeviceId> {
         let m = self.resources.get_mut(&(service_id, resource_type));
         if let Some(m) = m {
-            m.unmap_resources(virt_ids);
+            m.unmap_resources(virt_ids)
+        } else {
+            vec![]
         }
     }
 
@@ -191,6 +240,48 @@ impl InstanceState {
             m.virtual_to_physical
         ))?;
         Ok(phys_id)
+    }
+
+    pub fn get_device_id(
+        &self,
+        service_id: usize,
+        resource_type: ResourceTypeId,
+        virt_id: ResourceId,
+    ) -> Option<DeviceId> {
+        let m = self.resources.get(&(service_id, resource_type));
+        if let Some(m) = m {
+            m.get_device_id(virt_id)
+        } else {
+            None
+        }
+    }
+
+    pub fn evict_resource_ptr(
+        &mut self,
+        service_id: usize,
+        resource_type: ResourceTypeId,
+        virt_id: ResourceId,
+        new_ptr: ResourceId,
+        new_device: DeviceId,
+    ) {
+        let m = self.resources.get_mut(&(service_id, resource_type));
+        if let Some(m) = m {
+            m.evict_id(virt_id, new_ptr, new_device);
+        }
+    }
+
+    pub fn restore_resource_ptr(
+        &mut self,
+        service_id: usize,
+        resource_type: ResourceTypeId,
+        virt_id: ResourceId,
+        new_ptr: ResourceId,
+        new_device: DeviceId,
+    ) {
+        let m = self.resources.get_mut(&(service_id, resource_type));
+        if let Some(m) = m {
+            m.restore_id(virt_id, new_ptr, new_device);
+        }
     }
 }
 

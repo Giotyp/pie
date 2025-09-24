@@ -6,11 +6,31 @@ use std::time::Instant;
 use thiserror::Error;
 pub type ResourceId = u32;
 pub type ResourceTypeId = u32;
+pub type DeviceId = usize;
 
 pub static KV_PAGE_TYPE_ID: ResourceTypeId = 0;
 pub static EMBED_TYPE_ID: ResourceTypeId = 1;
 pub static ADAPTER_TYPE_ID: ResourceTypeId = 2;
 
+pub static GPU_0: DeviceId = 0;
+pub static CPU_0: DeviceId = 1;
+
+pub trait DeviceIdExt {
+    fn is_gpu(&self) -> bool;
+    fn get_gpu() -> DeviceId {
+        GPU_0
+    }
+    fn get_cpu() -> DeviceId {
+        CPU_0
+    }
+}
+
+impl DeviceIdExt for DeviceId {
+    fn is_gpu(&self) -> bool {
+        // Start definition with GPUs
+        *self < CPU_0
+    }
+}
 // ---- Custom ResourceError enum ----
 #[derive(Debug, Error)]
 pub enum ResourceError {
@@ -43,28 +63,40 @@ pub enum ResourceError {
 
     #[error("IdPool error: {0:?}")]
     IdPoolError(String),
+
+    #[error("Multiple errors occurred: GPU error: {gpu_error}, CPU error: {cpu_error}")]
+    MultipleErrors {
+        gpu_error: Box<ResourceError>,
+        cpu_error: Box<ResourceError>,
+    },
 }
 
 /// Manages the state of all resources, instances, and exports.
 #[derive(Debug)]
 pub struct ResourceManager {
-    res_pool: HashMap<ResourceTypeId, IdPool<u32>>,
+    gpu_res_pool: HashMap<ResourceTypeId, IdPool<u32>>,
+    cpu_res_pool: HashMap<ResourceTypeId, IdPool<u32>>,
     res_exported: HashMap<ResourceTypeId, HashMap<String, Vec<ResourceId>>>,
-    res_allocated: HashMap<(ResourceTypeId, InstanceId), HashSet<ResourceId>>,
+    gpu_res_allocated: HashMap<(ResourceTypeId, InstanceId), HashSet<ResourceId>>,
+    cpu_res_allocated: HashMap<(ResourceTypeId, InstanceId), HashSet<ResourceId>>,
     inst_start_time: HashMap<InstanceId, Instant>,
 }
 
 impl ResourceManager {
     pub fn new(resources: HashMap<ResourceTypeId, u32>) -> Self {
-        let mut res_pool = HashMap::new();
+        let mut gpu_res_pool = HashMap::new();
+        let mut cpu_res_pool = HashMap::new();
         for (res_id, capacity) in resources {
-            res_pool.insert(res_id, IdPool::new(capacity));
+            gpu_res_pool.insert(res_id, IdPool::new(capacity));
+            cpu_res_pool.insert(res_id, IdPool::new(capacity));
         }
 
         Self {
-            res_pool,
+            gpu_res_pool,
+            cpu_res_pool,
             res_exported: HashMap::new(),
-            res_allocated: HashMap::new(),
+            gpu_res_allocated: HashMap::new(),
+            cpu_res_allocated: HashMap::new(),
             inst_start_time: HashMap::new(),
         }
     }
@@ -75,19 +107,77 @@ impl ResourceManager {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         count: usize,
-    ) -> Result<Vec<ResourceId>, ResourceError> {
-        if self.available(type_id)? < count {
-            // Not enough memory, trigger the OOM killer.
-            self.oom_kill(type_id, count, inst_id)?;
+    ) -> Result<(Vec<ResourceId>, DeviceId), ResourceError> {
+        let available_device: DeviceId;
+        // Check GPU first
+        if self.available(type_id, GPU_0)? >= count {
+            available_device = GPU_0;
+        } else if self.available(type_id, CPU_0)? >= count {
+            available_device = CPU_0;
+        } else {
+            // Not enough memory, trigger the OOM killer for GPU
+            self.oom_kill(type_id, count, inst_id, GPU_0)?;
+            available_device = GPU_0;
         }
 
         // A successful oom_kill guarantees enough space.
-        self.allocate(inst_id, type_id, count)
+        self.allocate(inst_id, type_id, available_device, count)
     }
 
-    fn available(&self, type_id: ResourceTypeId) -> Result<usize, ResourceError> {
-        let pool = self
-            .res_pool
+    pub fn evict_restore(
+        &mut self,
+        inst_id: InstanceId,
+        type_id: ResourceTypeId,
+        device_ids: Vec<DeviceId>,
+        ptrs: Vec<ResourceId>,
+        evict: bool,
+    ) -> Result<(Vec<ResourceId>, DeviceId), ResourceError> {
+        // Deallocate pointers from GPU pool
+        let mut dealloc_devs = Vec::new();
+        let mut dealloc_ptrs = Vec::new();
+        for (ptr, device_id) in ptrs.iter().zip(device_ids.iter()) {
+            if evict && !device_id.is_gpu() {
+                // CPU resources are not evicted
+                continue;
+            } else if !evict && device_id.is_gpu() {
+                // GPU resources are not restored
+                continue;
+            }
+            dealloc_devs.push(*device_id);
+            dealloc_ptrs.push(*ptr);
+        }
+
+        let count = dealloc_ptrs.len();
+        self.deallocate(inst_id, type_id, dealloc_ptrs, dealloc_devs)?;
+
+        let device_id = if evict {
+            DeviceId::get_cpu()
+        } else {
+            DeviceId::get_gpu()
+        };
+
+        if self.available(type_id, device_id)? < count {
+            self.oom_kill(type_id, count, inst_id, device_id)?;
+        }
+
+        // Return new physical pointers
+        self.allocate(inst_id, type_id, device_id, count)
+    }
+
+    fn available(
+        &self,
+        type_id: ResourceTypeId,
+        device_id: DeviceId,
+    ) -> Result<usize, ResourceError> {
+        let res_pool = {
+            if device_id.is_gpu() {
+                &self.gpu_res_pool
+            } else {
+                &self.cpu_res_pool
+            }
+        };
+
+        let pool = res_pool
             .get(&type_id)
             .ok_or(ResourceError::PoolNotFound { type_id })?;
         Ok(pool.available())
@@ -97,10 +187,25 @@ impl ResourceManager {
         &mut self,
         inst_id: InstanceId,
         type_id: ResourceTypeId,
+        device_id: DeviceId,
         count: usize,
-    ) -> Result<Vec<ResourceId>, ResourceError> {
-        let pool = self
-            .res_pool
+    ) -> Result<(Vec<ResourceId>, DeviceId), ResourceError> {
+        let res_pool = {
+            if device_id.is_gpu() {
+                &mut self.gpu_res_pool
+            } else {
+                &mut self.cpu_res_pool
+            }
+        };
+        let res_allocated = {
+            if device_id.is_gpu() {
+                &mut self.gpu_res_allocated
+            } else {
+                &mut self.cpu_res_allocated
+            }
+        };
+
+        let pool = res_pool
             .get_mut(&type_id)
             .ok_or(ResourceError::PoolNotFound { type_id })?;
 
@@ -112,12 +217,12 @@ impl ResourceManager {
         self.inst_start_time
             .entry(inst_id)
             .or_insert_with(Instant::now);
-        self.res_allocated
+        res_allocated
             .entry((type_id, inst_id))
             .or_default()
             .extend(&allocated);
 
-        Ok(allocated)
+        Ok((allocated, device_id))
     }
 
     pub fn deallocate(
@@ -125,20 +230,49 @@ impl ResourceManager {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         ptrs: Vec<ResourceId>,
+        device_ids: Vec<DeviceId>,
     ) -> Result<(), ResourceError> {
-        let allocated = self
-            .res_allocated
-            .get_mut(&(type_id, inst_id))
-            .ok_or(ResourceError::InstanceNotAllocated { inst_id, type_id })?;
+        match self.deallocate_device(inst_id, type_id, device_ids, &ptrs) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                return Err(error);
+            }
+        }
+    }
 
-        let pool = self
-            .res_pool
-            .get_mut(&type_id)
-            .ok_or(ResourceError::PoolNotFound { type_id })?;
+    fn deallocate_device(
+        &mut self,
+        inst_id: InstanceId,
+        type_id: ResourceTypeId,
+        device_ids: Vec<DeviceId>,
+        ptrs: &Vec<ResourceId>,
+    ) -> Result<(), ResourceError> {
+        for (ptr, device_id) in ptrs.iter().zip(device_ids.iter()) {
+            let res_allocated = {
+                if device_id.is_gpu() {
+                    &mut self.gpu_res_allocated
+                } else {
+                    &mut self.cpu_res_allocated
+                }
+            };
+            let res_pool = {
+                if device_id.is_gpu() {
+                    &mut self.gpu_res_pool
+                } else {
+                    &mut self.cpu_res_pool
+                }
+            };
 
-        for ptr in ptrs {
+            let allocated = res_allocated
+                .get_mut(&(type_id, inst_id))
+                .ok_or(ResourceError::InstanceNotAllocated { inst_id, type_id })?;
+
+            let pool = res_pool
+                .get_mut(&type_id)
+                .ok_or(ResourceError::PoolNotFound { type_id })?;
+
             if allocated.remove(&ptr) {
-                pool.release(ptr).unwrap();
+                pool.release(*ptr).unwrap();
             }
         }
 
@@ -150,6 +284,7 @@ impl ResourceManager {
         type_id: ResourceTypeId,
         size: usize,
         inst_id_to_exclude: InstanceId,
+        device_id: DeviceId,
     ) -> Result<(), ResourceError> {
         let requester_start_time = self
             .inst_start_time
@@ -162,7 +297,7 @@ impl ResourceManager {
             })?;
 
         loop {
-            if self.available(type_id)? >= size {
+            if self.available(type_id, device_id)? >= size {
                 break;
             }
 
@@ -174,7 +309,7 @@ impl ResourceManager {
                 .map(|(id, _)| *id);
 
             if let Some(victim_id) = victim_id {
-                self.cleanup(victim_id)?;
+                self.cleanup_id(victim_id, device_id)?;
                 trap(
                     victim_id,
                     TerminationCause::OutOfResources(
@@ -191,8 +326,44 @@ impl ResourceManager {
     }
 
     pub fn cleanup(&mut self, inst_id: InstanceId) -> Result<(), ResourceError> {
+        // Clean up both GPU and CPU resources
+        let gpu_cleanup = self.cleanup_id(inst_id, GPU_0);
+        let cpu_cleanup = self.cleanup_id(inst_id, CPU_0);
+
+        match (gpu_cleanup, cpu_cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(gpu_error), Err(cpu_error)) => Err(ResourceError::MultipleErrors {
+                gpu_error: Box::new(gpu_error),
+                cpu_error: Box::new(cpu_error),
+            }),
+            (Err(gpu_error), _) => Err(gpu_error),
+            (_, Err(cpu_error)) => Err(cpu_error),
+        }
+    }
+
+    fn cleanup_id(
+        &mut self,
+        inst_id: InstanceId,
+        device_id: DeviceId,
+    ) -> Result<(), ResourceError> {
         let mut to_release_by_type: HashMap<ResourceTypeId, Vec<ResourceId>> = HashMap::new();
-        self.res_allocated.retain(|(ty, id), ptrs| {
+
+        let res_allocated = {
+            if device_id.is_gpu() {
+                &mut self.gpu_res_allocated
+            } else {
+                &mut self.cpu_res_allocated
+            }
+        };
+        let res_pool = {
+            if device_id.is_gpu() {
+                &mut self.gpu_res_pool
+            } else {
+                &mut self.cpu_res_pool
+            }
+        };
+
+        res_allocated.retain(|(ty, id), ptrs| {
             if *id == inst_id {
                 to_release_by_type
                     .entry(*ty)
@@ -205,8 +376,7 @@ impl ResourceManager {
         });
 
         for (ty, ptrs) in to_release_by_type {
-            let pool = self
-                .res_pool
+            let pool = res_pool
                 .get_mut(&ty)
                 .ok_or(ResourceError::PoolNotFound { type_id: ty })?;
             for ptr in ptrs {
@@ -227,7 +397,7 @@ impl ResourceManager {
         name: String,
     ) -> Result<(), ResourceError> {
         let allocated = self
-            .res_allocated
+            .gpu_res_allocated
             .get_mut(&(type_id, inst_id))
             .ok_or(ResourceError::InstanceNotAllocated { inst_id, type_id })?;
 
@@ -276,7 +446,7 @@ impl ResourceManager {
 
         if let Some(ptrs_to_release) = type_exports.remove(&name) {
             let pool = self
-                .res_pool
+                .gpu_res_pool
                 .get_mut(&type_id)
                 .ok_or(ResourceError::PoolNotFound { type_id })?;
             for ptr in ptrs_to_release {
@@ -303,20 +473,22 @@ impl ResourceManager {
     /// Appends detailed statistics about the resource manager's state to a given HashMap.
     pub fn append_stats_to(&self, stats: &mut HashMap<String, String>) {
         // Report on each resource pool
-        for (type_id, pool) in &self.res_pool {
-            let capacity = pool.capacity() as usize;
-            let available = pool.available();
-            let used = capacity - available;
+        for pool_type in vec![&self.gpu_res_pool, &self.cpu_res_pool] {
+            for (type_id, pool) in pool_type {
+                let capacity = pool.capacity() as usize;
+                let available = pool.available();
+                let used = capacity - available;
 
-            stats.insert(
-                format!("resource.{}.capacity", type_id),
-                capacity.to_string(),
-            );
-            stats.insert(
-                format!("resource.{}.available", type_id),
-                available.to_string(),
-            );
-            stats.insert(format!("resource.{}.used", type_id), used.to_string());
+                stats.insert(
+                    format!("resource.{}.capacity", type_id),
+                    capacity.to_string(),
+                );
+                stats.insert(
+                    format!("resource.{}.available", type_id),
+                    available.to_string(),
+                );
+                stats.insert(format!("resource.{}.used", type_id), used.to_string());
+            }
         }
 
         // Report on active instances

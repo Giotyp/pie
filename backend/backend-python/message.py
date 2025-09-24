@@ -133,3 +133,13 @@ class DownloadAdapterResponse(msgspec.Struct, gc=False):
     """Response message containing adapter data."""
 
     adapter_data: bytes
+
+class EvictResourceRequest(msgspec.Struct, gc=False):
+    type_id: int
+    src_ptrs: list[int]
+    dst_ptrs: list[int]
+
+class RestoreResourceRequest(msgspec.Struct, gc=False):
+    type_id: int
+    src_ptrs: list[int]
+    dst_ptrs: list[int]
