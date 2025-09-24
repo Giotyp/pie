@@ -93,21 +93,11 @@ async fn test_memory_swap(prompt: &str, max_tokens: usize) -> Result<(), String>
 
     // Step 3: Evict KV pages to free memory
     println!("\n3. Evicting KV pages to storage...");
-    let cpu_ids = ctx.queue().evict_kv_pages(&ctx.kv_pages);
-    if cpu_ids.is_empty() {
-        println!("No KV pages were evicted.");
-    } else {
-        println!("KV pages evicted with returned CPU IDs: {:?}", cpu_ids);
-    }
+    ctx.queue().evict_kv_pages(&ctx.kv_pages);
 
     // Step 4: Restore KV pages from storage
     println!("\n4. Restoring KV pages from storage...");
-    let gpu_ids = ctx.queue().restore_kv_pages(&cpu_ids);
-    if gpu_ids.is_empty() {
-        println!("No KV pages were restored.");
-    } else {
-        println!("KV pages restored with returned GPU IDs: {:?}", gpu_ids);
-    }
+    ctx.queue().restore_kv_pages(&ctx.kv_pages);
 
     println!("\nMemory swap test completed successfully!");
     println!("   Total time: {:?}", start.elapsed());
