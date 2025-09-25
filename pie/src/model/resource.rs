@@ -110,14 +110,14 @@ impl ResourceManager {
     ) -> Result<(Vec<ResourceId>, DeviceId), ResourceError> {
         let available_device: DeviceId;
         // Check GPU first
-        if self.available(type_id, GPU_0)? >= count {
-            available_device = GPU_0;
-        } else if self.available(type_id, CPU_0)? >= count {
-            available_device = CPU_0;
+        if self.available(type_id, DeviceId::get_gpu())? >= count {
+            available_device = DeviceId::get_gpu();
+        } else if self.available(type_id, DeviceId::get_cpu())? >= count {
+            available_device = DeviceId::get_cpu();
         } else {
             // Not enough memory, trigger the OOM killer for GPU
-            self.oom_kill(type_id, count, inst_id, GPU_0)?;
-            available_device = GPU_0;
+            self.oom_kill(type_id, count, inst_id, DeviceId::get_gpu())?;
+            available_device = DeviceId::get_gpu();
         }
 
         // A successful oom_kill guarantees enough space.

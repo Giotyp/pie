@@ -670,6 +670,7 @@ impl Service for Model {
                 }
                 Err(e) => trap_exception(inst_id, e),
             },
+
             Command::Deallocate {
                 inst_id,
                 type_id,

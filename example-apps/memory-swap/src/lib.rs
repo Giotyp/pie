@@ -75,7 +75,7 @@ async fn test_memory_swap(prompt: &str, max_tokens: usize) -> Result<(), String>
     let model = inferlet::get_auto_model();
     let _tokenizer = model.get_tokenizer();
 
-    // Step 1: Create a context and fill it with some content
+    // Create a context and fill it with some content
     println!("1. Creating context and filling with initial content...");
     let mut ctx = model.create_context();
     ctx.fill_system(SYSTEM_PROMPT);
@@ -83,7 +83,7 @@ async fn test_memory_swap(prompt: &str, max_tokens: usize) -> Result<(), String>
 
     println!("   Context created with {} KV pages", ctx.kv_pages.len());
 
-    // Step 2: Generate some initial response to build up KV cache
+    // Generate some initial response to build up KV cache
     println!("\n2. Generating initial response to build KV cache...");
     let final_text = ctx
         .generate_until(Sampler::top_p(0.6, 0.95), max_tokens as usize)
@@ -91,13 +91,13 @@ async fn test_memory_swap(prompt: &str, max_tokens: usize) -> Result<(), String>
     println!("   Generated: {}", final_text.trim());
     println!("   KV cache now has {} pages", ctx.kv_pages.len());
 
-    // Step 3: Evict KV pages to free memory
+    // Evict KV pages to free memory
     println!("\n3. Evicting KV pages to storage...");
-    ctx.queue().evict_kv_pages(&ctx.kv_pages);
+    ctx.queue().evict_kv_pages(&ctx.kv_pages[0..2]);
 
-    // Step 4: Restore KV pages from storage
+    // Restore KV pages from storage
     println!("\n4. Restoring KV pages from storage...");
-    ctx.queue().restore_kv_pages(&ctx.kv_pages);
+    ctx.queue().restore_kv_pages(&ctx.kv_pages[0..2]);
 
     println!("\nMemory swap test completed successfully!");
     println!("   Total time: {:?}", start.elapsed());
