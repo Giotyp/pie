@@ -302,7 +302,7 @@ impl inferlet::core::common::Host for InstanceState {
             dst_ptrs: cpu_ptrs,
         });
 
-        submit_request(svc_id, queue_id, priority, req);
+        submit_request(svc_id, queue_id, priority, req)?;
 
         Ok(())
     }
@@ -368,7 +368,7 @@ impl inferlet::core::common::Host for InstanceState {
             dst_ptrs: gpu_ptrs,
         });
 
-        submit_request(svc_id, queue_id, priority, req);
+        submit_request(svc_id, queue_id, priority, req)?;
 
         Ok(())
     }
