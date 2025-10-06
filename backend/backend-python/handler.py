@@ -372,7 +372,7 @@ class Handler:
 
         return responses
 
-        @torch.inference_mode()
+    @torch.inference_mode()
     def evict_kv_pages(self, reqs: list[message.EvictResourceRequest]):
         for req in reqs:
             for layer in range(self.lm.config.num_layers):

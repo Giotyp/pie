@@ -17,7 +17,7 @@ pub mod brle;
 pub mod chat;
 pub mod context;
 pub mod drafter;
-mod forward;
+pub mod forward;
 mod image;
 mod pool;
 pub mod sampler;
@@ -310,11 +310,11 @@ impl Queue {
     }
 
     pub fn evict_resource(&self, resource: Resource, ptrs: &[u32]) {
-        core::evict_resources(&self.inner, resource as u32, ptrs)
+        api::evict_resources(&self.inner, resource as u32, ptrs)
     }
 
     pub fn restore_resource(&self, resource: Resource, ptrs: &[u32]) {
-        core::restore_resources(&self.inner, resource as u32, ptrs)
+        api::restore_resources(&self.inner, resource as u32, ptrs)
     }
 }
 

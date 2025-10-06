@@ -96,5 +96,16 @@ interface common {
         name: string
     ) -> list<pointer>;
 
+    evict-resources: func(
+        queue: borrow<queue>,
+        resource-type: u32,
+        ptrs: list<pointer>
+    );
+
+    restore-resources: func(
+        queue: borrow<queue>,
+        resource-type: u32,
+        ptrs: list<pointer>
+    );
 
 }

@@ -1,4 +1,4 @@
-use inferlet::interface::Forward;
+use inferlet::forward::Forward;
 use inferlet::stop_condition::{StopCondition, ends_with_any, max_len};
 use inferlet::{Args, Result, Sampler, set_return};
 use std::time::Instant;
