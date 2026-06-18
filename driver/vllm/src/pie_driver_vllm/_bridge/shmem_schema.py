@@ -112,6 +112,8 @@ def peek_method_tag(payload: bytes) -> int:
         return ar.op.value + 5
     if kind == _pb.REQUEST_HEALTH:
         return 9  # synthetic HEALTH
+    if kind == _pb.REQUEST_UPDATE_WEIGHTS:
+        return 14
     raise ValueError(f"unknown payload_kind {kind}")
 
 

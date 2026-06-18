@@ -331,6 +331,22 @@ impl Session {
         }
     }
 
+    pub(super) async fn handle_update_weights(
+        &mut self,
+        corr_id: u32,
+        handles: Vec<(String, serde_bytes::ByteBuf)>,
+    ) {
+        let handles: Vec<(String, Vec<u8>)> = handles
+            .into_iter()
+            .map(|(n, b)| (n, b.into_vec()))
+            .collect();
+        
+        match crate::driver::update_weights(0, handles).await {
+            Ok(()) => self.send_response(corr_id, true, "ok".to_string()).await,
+            Err(e) => self.send_response(corr_id, false, e.to_string()).await,
+        }
+    }
+
     pub(super) async fn handle_list_processes(&self, corr_id: u32) {
         let mut processes = Vec::new();
         for id in process::list() {

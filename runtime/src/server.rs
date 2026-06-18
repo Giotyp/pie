@@ -687,6 +687,10 @@ impl Session {
                 record,
             } => self.handle_query(corr_id, subject, record).await,
 
+            ClientMessage::UpdateWeights { corr_id, handles } => {
+                self.handle_update_weights(corr_id, handles).await
+            }
+
             ClientMessage::AddProgram {
                 corr_id,
                 program_hash,

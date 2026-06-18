@@ -61,6 +61,7 @@ pub enum RequestPayload {
     Copy(CopyRequest),
     Adapter(AdapterRequest),
     Health,
+    UpdateWeights(UpdateWeightsRequest),
 }
 
 #[schema]
@@ -338,6 +339,18 @@ pub enum AdapterOp {
     // error). Reuses the Adapter cold-path transport so no new wire payload
     // variant is needed. See AUDIO_OUTPUT.md.
     GenerateAudio,
+}
+
+/// One (param_name, pickled CUDA-IPC reduce_tensor handle) pair.\
+#[schema]
+pub struct WeightHandle {
+    pub name: String,
+    pub blob: Vec<u8>,
+}
+
+#[schema]
+pub struct UpdateWeightsRequest {
+    pub handles: Vec<WeightHandle>,
 }
 
 /// Generic status response. Convention:

@@ -512,6 +512,7 @@ def _leader_loop(
     _METHOD_ZO_INITIALIZE_ADAPTER = _methods.ZO_INITIALIZE_ADAPTER
     _METHOD_ZO_UPDATE_ADAPTER = _methods.ZO_UPDATE_ADAPTER
     _METHOD_HEALTH = _methods.HEALTH
+    _METHOD_UPDATE_WEIGHTS = _methods.UPDATE_WEIGHTS
 
     def _handle_copy_v2(method_tag: int, srcs: list, dsts: list) -> int:
         try:
@@ -624,6 +625,18 @@ def _leader_loop(
                 lease.commit_status(0)
             elif method_tag == _METHOD_HEALTH:
                 lease.commit_status(0)
+            elif method_tag == _METHOD_UPDATE_WEIGHTS:
+                uw = _pb.Frame.parse(payload).payload.as_update_weights()
+                if uw is None:
+                    lease.commit_status(2)
+                    continue
+                try:
+                    handles = [(uw.handles_at(i).name, bytes(uw.handles_at(i).blob)) for i in range(uw.handles_len)]
+                    engine.update_weights(handles)
+                    lease.commit_status(0)
+                except Exception as e:
+                    print(f"[pie-driver] update_weights failed: {e}")
+                    lease.commit_status(2)
             else:
                 # Unknown method — bad_method status.
                 lease.commit_status(2)

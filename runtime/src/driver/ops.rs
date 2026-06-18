@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use pie_bridge::{
     AdapterOp, AdapterRequest, CopyDir, CopyRequest, CopyResource, RequestPayload, ResponsePayload,
+    UpdateWeightsRequest, WeightHandle,
 };
 
 use super::channel::with_channel;
@@ -216,6 +217,30 @@ pub async fn generate_audio(
         pcm.push(f32::from_le_bytes(b));
     }
     Ok(pcm)
+}
+
+pub async fn update_weights(driver_idx: DriverId, handles: Vec<(String, Vec<u8>)>) -> Result<()> {
+    let handles = handles
+        .into_iter()
+        .map(|(name, blob)| WeightHandle { name, blob })
+        .collect();
+    let ch = super::channel::get_channel(driver_idx)?;
+    let resp = ch
+        .submit(DriverRequest {
+            driver_id: driver_idx,
+            payload: RequestPayload::UpdateWeights(UpdateWeightsRequest { handles }),
+        })
+        .await?;
+    match resp.payload {
+        ResponsePayload::Status(s) if s.status == 0 => Ok(()),
+        ResponsePayload::Status(s) => Err(anyhow::anyhow!(
+            "update_weights returned status {}",
+            s.status
+        )),
+        ResponsePayload::Forward(_) => Err(anyhow::anyhow!(
+            "update_weights got forward response (driver bug)"
+        )),
+    }
 }
 
 async fn submit_adapter_op(req: DriverRequest, method_name: &'static str) -> Result<()> {

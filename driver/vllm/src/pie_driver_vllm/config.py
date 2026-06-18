@@ -61,6 +61,10 @@ class VllmDriverConfig:
     # step can resume normally.
     decode_lookahead_tokens: int = 1
 
+    # RL weight sync (NCCL live transfer) - Weight source at startup
+    # "dummy" = random weights; None = vllm default
+    load_format: str | None = None
+
     # ---- Speculative decoding (NGRAM, driver-supplied drafts) ----
     # When True, VllmEngine.spec_step proposes linear draft continuations.
     # Verification + splice run in the shared `._bridge.batching.Batch`

@@ -313,6 +313,15 @@ class PieClient:
         """Send a generic query to the server."""
         msg = {"type": "query", "subject": subject, "record": record}
         return await self._send_msg_and_wait(msg)
+    
+    async def update_weights(self, handles: list[tuple[str, bytes]]) -> tuple[bool, str]:
+        """Push policy weights to the colocated rollout engine via CUDA IPC.
+
+          Each handle is pickle.dumps(reduce_tensor(tensor)) produced by a
+          process sharing the engine's GPU. Returns (ok, value).
+          """
+        msg = {"type": "update_weights", "handles": handles}
+        return await self._send_msg_and_wait(msg)
 
     async def resolve_version(self, name: str, registry_url: str) -> str:
         """Resolve a bare program name to name@version using the registry.

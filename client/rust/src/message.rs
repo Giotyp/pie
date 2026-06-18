@@ -34,6 +34,12 @@ pub enum ClientMessage {
         record: String,
     },
 
+    #[serde(rename = "update_weights")]
+    UpdateWeights {
+        corr_id: u32,
+        handles: Vec<(String, serde_bytes::ByteBuf)>,
+    },
+
     #[serde(rename = "add_program")]
     AddProgram {
         corr_id: u32,

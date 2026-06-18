@@ -703,6 +703,37 @@ class VllmEngine:
 
     def save_adapter(self, *args, **kwargs):
         return b""
+    
+    # ------------------------------------------------------------------
+    # RL weight sync - colocated CUDA IPC (zero-copy, mimics verl)
+    # ------------------------------------------------------------------
+
+    def update_weights(self, handles: list[tuple[str, bytes]]) -> str:
+        """Apply policy weights shared zero-copy via CUDA IPC.
+
+        Each item is (param_name, pickled_handle), where the trainer produced
+        pickled_handle = pickle.dumps(
+            torch.multiprocessing.reductions.reduce_tensor(tensor)
+        ). Trainer and this driver share the same physical GPU, so rebuilding a
+        handle yields a zero-copy view of the trainer's GPU memory. We copy it
+        into our params via model.load_weights (which remaps HF names to vllm's
+        fused params and does an in-place copy_), then synchronize — so the
+        trainer may free its source tensors once this RPC returns.
+        """
+        import pickle
+        import torch
+
+        dev_index = torch.device(self.config.device).index or 0
+        weights: list[tuple[str, torch.Tensor]] = []
+        for name, h in handles:
+            func, args = pickle.loads(bytes(h))
+            args = list(args)
+            args[6] = dev_index  # storage_device -> our local index for the same GPU
+            weights.append((name, func(*args)))
+
+        self.forward_pass.model.load_weights(weights)
+        torch.cuda.synchronize()
+        return "ok"
 
     # ------------------------------------------------------------------
     # Metadata
