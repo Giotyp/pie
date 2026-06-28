@@ -37,6 +37,10 @@ pub enum ClientMessage {
     #[serde(rename = "update_weights")]
     UpdateWeights {
         corr_id: u32,
+        // Which DP replica (Pie device index) to push into. Defaults to 0 so
+        // pre-DP clients (single-engine smoke scripts) keep working unchanged.
+        #[serde(default)]
+        device_idx: usize,
         handles: Vec<(String, serde_bytes::ByteBuf)>,
     },
 

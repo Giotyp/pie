@@ -314,13 +314,17 @@ class PieClient:
         msg = {"type": "query", "subject": subject, "record": record}
         return await self._send_msg_and_wait(msg)
     
-    async def update_weights(self, handles: list[tuple[str, bytes]]) -> tuple[bool, str]:
-        """Push policy weights to the colocated rollout engine via CUDA IPC.
+    async def update_weights(
+        self, handles: list[tuple[str, bytes]], device_idx: int = 0
+    ) -> tuple[bool, str]:
+        """Push policy weights to a colocated rollout engine via CUDA IPC.
 
           Each handle is pickle.dumps(reduce_tensor(tensor)) produced by a
-          process sharing the engine's GPU. Returns (ok, value).
+          process sharing the engine's GPU. ``device_idx`` selects which DP
+          replica (Pie device index) to push into; defaults to 0 (single engine).
+          Returns (ok, value).
           """
-        msg = {"type": "update_weights", "handles": handles}
+        msg = {"type": "update_weights", "device_idx": device_idx, "handles": handles}
         return await self._send_msg_and_wait(msg)
 
     async def resolve_version(self, name: str, registry_url: str) -> str:

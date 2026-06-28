@@ -191,7 +191,10 @@ impl Session {
                         serde_json::Value::from(inf.fire.execute.driver_cuda.sum_sync_us),
                     );
                     stats.insert(
-                        format!("{}.fire.execute.driver_cuda.sum_kernel_launch_us", model_name),
+                        format!(
+                            "{}.fire.execute.driver_cuda.sum_kernel_launch_us",
+                            model_name
+                        ),
                         serde_json::Value::from(inf.fire.execute.driver_cuda.sum_kernel_launch_us),
                     );
                     stats.insert(
@@ -211,26 +214,16 @@ impl Session {
                         serde_json::Value::from(inf.system_spec_draft_tokens_accepted),
                     );
                     stats.insert(
-                        format!(
-                            "{}.system_spec_draft_tokens_proposed_per_pos",
-                            model_name
-                        ),
-                        serde_json::json!(
-                            trim_trailing_zeros(
-                                &inf.system_spec_draft_tokens_proposed_per_pos
-                            )
-                        ),
+                        format!("{}.system_spec_draft_tokens_proposed_per_pos", model_name),
+                        serde_json::json!(trim_trailing_zeros(
+                            &inf.system_spec_draft_tokens_proposed_per_pos
+                        )),
                     );
                     stats.insert(
-                        format!(
-                            "{}.system_spec_draft_tokens_accepted_per_pos",
-                            model_name
-                        ),
-                        serde_json::json!(
-                            trim_trailing_zeros(
-                                &inf.system_spec_draft_tokens_accepted_per_pos
-                            )
-                        ),
+                        format!("{}.system_spec_draft_tokens_accepted_per_pos", model_name),
+                        serde_json::json!(trim_trailing_zeros(
+                            &inf.system_spec_draft_tokens_accepted_per_pos
+                        )),
                     );
                     // Speculation hit counters — observability for
                     // `try_hit`/chain submissions/drops.
@@ -334,14 +327,17 @@ impl Session {
     pub(super) async fn handle_update_weights(
         &mut self,
         corr_id: u32,
+        device_idx: usize,
         handles: Vec<(String, serde_bytes::ByteBuf)>,
     ) {
         let handles: Vec<(String, Vec<u8>)> = handles
             .into_iter()
             .map(|(n, b)| (n, b.into_vec()))
             .collect();
-        
-        match crate::driver::update_weights(0, handles).await {
+
+        // Route to the requested DP replica: rank i's push lands on its colocated
+        // engine (device i). An unknown index returns Err, surfaced below.
+        match crate::driver::update_weights(device_idx, handles).await {
             Ok(()) => self.send_response(corr_id, true, "ok".to_string()).await,
             Err(e) => self.send_response(corr_id, false, e.to_string()).await,
         }
